@@ -4,10 +4,25 @@
 """
 from datetime import date
 
+from common import fetch_csv
+
+# Deux systèmes sources distincts (CRM anglophone / CRM francophone) : on les garde séparés en
+# bronze, tels que livrés. La consolidation dans un schéma unique se fera en silver.
+SOURCES = ("en", "fr")
+
+
+def _snapshot_file(lang: str, day: date = None, init: bool = False):
+    if init:
+        return "init", f"passengers_{lang}.csv"
+    assert day is not None
+    return "2025-09", f"passengers_{lang}_{day.isoformat()}.csv"
+
 
 def ingest_bronze(day: date = None, init: bool = False):
-    # TODO : télécharger les deux snapshots (EN et FR) du jour (ou de init/) vers bronze/.
-    raise NotImplementedError
+    """Rapatrie les deux snapshots complets (EN et FR) du jour (ou de init/) dans bronze/."""
+    for lang in SOURCES:
+        subdir, filename = _snapshot_file(lang, day, init)
+        fetch_csv(subdir, filename)
 
 
 def create_silver_table(con):
