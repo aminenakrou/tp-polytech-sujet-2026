@@ -53,3 +53,43 @@ def fetch_csv(subdir: str, filename: str) -> pd.DataFrame:
 
 def get_connection() -> duckdb.DuckDBPyConnection:
     return duckdb.connect(DB_PATH)
+
+
+def upsert_snapshot(con, table: str, key: str, cols: list, snapshot_date):
+    """Applique un snapshot COMPLET (table temporaire `snapshot`) sur une dimension silver.
+
+    Utilisé par les dimensions livrées en extrait complet quotidien (vols, passagers) : la source
+    ne dit pas ce qui a changé, c'est la comparaison snapshot du jour <-> état silver qui le révèle.
+
+    1. Upsert : clé inconnue -> insertion ; clé connue -> mise à jour, mais UNIQUEMENT si au moins
+       une valeur a réellement changé (ou si la ligne était désactivée et réapparaît). Une ligne
+       identique à la veille n'est pas retouchée : son update_timestamp garde donc un vrai sens
+       ("dernière modification constatée") et rejouer le même jour ne modifie rien (idempotence).
+       insert_timestamp n'est jamais dans le SET : il reste figé à la première apparition.
+    2. Désactivation : les clés actives absentes du snapshot ont disparu de la source. On ne les
+       supprime jamais physiquement (des réservations les référencent) : is_active passe à false
+       et deleted_date est figée au jour où la disparition est constatée.
+    """
+    all_cols = [key] + cols
+    col_list = ", ".join(all_cols)
+    set_clause = ", ".join(f"{c} = excluded.{c}" for c in cols)
+    # IS DISTINCT FROM (et pas <>) : compare correctement les NULL (NULL <> 'x' vaut NULL, pas true).
+    has_changed = " OR ".join(f"{table}.{c} IS DISTINCT FROM excluded.{c}" for c in cols)
+
+    con.begin()  # les deux étapes forment un tout : soit les deux passent, soit aucune
+    con.execute(f"""
+        INSERT INTO {table} ({col_list}, is_active, deleted_date, insert_timestamp, update_timestamp)
+        SELECT {col_list}, true, NULL, now(), now()
+        FROM snapshot
+        ON CONFLICT ({key}) DO UPDATE SET
+            {set_clause}, is_active = true, deleted_date = NULL, update_timestamp = now()
+        WHERE {table}.is_active = false OR {has_changed}
+    """)
+    con.execute(
+        f"""
+        UPDATE {table} SET is_active = false, deleted_date = ?, update_timestamp = now()
+        WHERE is_active = true AND {key} NOT IN (SELECT {key} FROM snapshot)
+        """,
+        [snapshot_date],
+    )
+    con.commit()
