@@ -189,7 +189,11 @@ def ingest_gold():
             f.airline,
             count(*)                             AS nb_bookings,
             sum(fb.amount_eur)                   AS revenue_eur,
-            CAST(round(avg(fb.amount_eur), 2) AS DECIMAL(12, 2)) AS avg_amount_eur,
+            -- Moyenne passée en DECIMAL avant l'arrondi : une division DuckDB renvoie un DOUBLE, et
+            -- arrondir directement un DOUBLE tombant pile sur un demi-centime (ex. 376.925) donne
+            -- 376.92 ou 376.93 selon la version. En décimal l'arrondi est exact et reproductible.
+            CAST(round(CAST(sum(fb.amount_eur) / count(*) AS DECIMAL(18, 6)), 2) AS DECIMAL(12, 2))
+                                                 AS avg_amount_eur,
             min(fb.insert_timestamp)             AS insert_timestamp,
             max(fb.update_timestamp)             AS update_timestamp
         FROM fact_booking fb

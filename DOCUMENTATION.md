@@ -219,7 +219,9 @@ erDiagram
     }
 ```
 
-*(Toutes les tables gold portent aussi `insert_timestamp` et `update_timestamp`.)*
+*(Toutes les tables silver et gold construites par le pipeline portent aussi `insert_timestamp` et
+`update_timestamp`. Seule exception : `dim_currency`, fournie « telle quelle » par
+`sql/init/dim_currency.sql` et volontairement non modifiée.)*
 
 Attributs calculés et leurs formules :
 
