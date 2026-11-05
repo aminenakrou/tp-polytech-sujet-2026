@@ -142,12 +142,18 @@ erDiagram
     fact_booking }o--|| dim_airport : "airport_id (départ)"
     fact_booking }o--|| dim_date : booking_date
     fact_booking }o--|| dim_currency : currency
+    fact_booking }o--|| dim_flight_history : "flight_sk (version à la date de réservation)"
+    fact_booking }o--|| dim_passenger_history : "passenger_sk (version à la date de réservation)"
     dim_flight }o--|| dim_airport : "origin / destination"
+    dim_flight ||--|{ dim_flight_history : "flight_id (versions)"
+    dim_passenger ||--|{ dim_passenger_history : "passenger_id (versions)"
 
     fact_booking {
         varchar booking_id PK
         varchar passenger_id FK
+        varchar passenger_sk FK
         varchar flight_id FK
+        varchar flight_sk FK
         varchar airport_id FK
         date booking_date FK
         date flight_date
@@ -217,7 +223,32 @@ erDiagram
         varchar currency PK
         double rate_to_eur
     }
+    dim_flight_history {
+        varchar flight_sk PK
+        varchar flight_id
+        varchar aircraft_type
+        date flight_date
+        time departure_time
+        int duration_minutes
+        date valid_from
+        date valid_to
+        boolean is_current
+    }
+    dim_passenger_history {
+        varchar passenger_sk PK
+        varchar passenger_id
+        varchar email
+        varchar last_name
+        varchar nationality
+        varchar age_band
+        date valid_from
+        date valid_to
+        boolean is_current
+    }
 ```
+
+*(Les tables `*_history` reprennent toutes les colonnes de leur dimension courante ; seules les
+colonnes utiles à la lecture du diagramme sont affichées. Elles sont détaillées en section 6.)*
 
 *(Toutes les tables silver et gold construites par le pipeline portent aussi `insert_timestamp` et
 `update_timestamp`. Seule exception : `dim_currency`, fournie « telle quelle » par
@@ -261,12 +292,18 @@ aucun doublon et ne modifie aucune ligne (vérifié en relançant le 30/09 puis 
 
 ## 5. Limites connues
 
-- **Pas d'historique des dimensions (SCD de type 1)** : quand un vol change d'horaire ou d'avion,
-  seule la valeur courante est gardée. On ne peut pas savoir quel avion était affecté à un vol à
-  une date passée, et `days_before_departure` utilise la date de vol *actuelle*.
+- **Historique limité au mois observé** : l'historique SCD2 (section 6) commence avec `init/`. On
+  ne connaît pas les versions antérieures au 31/08/2025 : l'état initial est réputé valide depuis
+  toujours (`valid_from = 1900-01-01`). Les aéroports, quasi figés, ne sont pas historisés.
+- **Granularité journalière** : la source livre un état par jour ; deux changements le même jour
+  ne seraient vus que comme un seul, et l'heure exacte d'un changement est inconnue.
+- **`days_before_departure` utilise la date de vol actuelle** (`dim_flight`), c'est-à-dire la date à
+  laquelle le passager part réellement si le vol a été décalé. La date prévue au moment de la
+  réservation reste disponible via `flight_sk` → `dim_flight_history.flight_date`.
 - **Ordre chronologique supposé** : chaque snapshot est traité comme l'état de vérité du moment.
-  Rejouer un jour *ancien* après un jour plus récent ramènerait temporairement les dimensions à cet
-  état ancien (rejouer le mois complet dans l'ordre redonne le bon état final).
+  Pour les tables d'état courant, rejouer un jour *ancien* après un jour plus récent ramènerait
+  temporairement les dimensions à cet état ancien (rejouer le mois complet dans l'ordre redonne le
+  bon état final). L'historique SCD2, lui, est protégé par un garde-fou (section 6).
 - **Fuseaux horaires ignorés** : la source ne donne pas de fuseau ; les durées supposent que départ
   et arrivée sont exprimés dans le même référentiel horaire, et qu'aucun vol ne dure plus de 24 h.
 - **Taux de change fixes** (fournis) : `amount_eur` ne reflète pas le taux du jour de la réservation.
@@ -275,3 +312,73 @@ aucun doublon et ne modifie aucune ligne (vérifié en relançant le 30/09 puis 
 - **Désactivation globale** : un fichier source vide ou tronqué un jour donné désactiverait toutes
   les lignes absentes. Un vrai pipeline ajouterait un garde-fou (ex. refuser un snapshot dont la
   taille chute brutalement).
+
+## 6. Bonus — historisation complète (SCD2) des vols et des passagers
+
+Les tables `dim_flight` / `dim_passenger` (SCD de type 1) ne gardent que l'état courant : quand un
+vol change d'avion, l'ancienne valeur est écrasée. Pour répondre à des questions comme *« quel
+avion était affecté à tel vol à telle date ? »*, chaque **version** est conservée dans une table
+d'historique, à côté des tables d'état courant (qui restent les plus simples à interroger).
+
+| Couche | Vols | Passagers |
+|---|---|---|
+| silver | `silver_flights_history` | `silver_passengers_history` |
+| gold | `dim_flight_history` (+ durée, vol de nuit…) | `dim_passenger_history` (+ âge, tranche d'âge) |
+
+Les deux dimensions historisées sont celles qui changent réellement (21 vols et 11 passagers
+modifiés sur le mois) ; les aéroports (1 seule correction) restent en SCD1.
+
+### Principe
+
+Chaque version a une **période de validité `[valid_from, valid_to[`** (début inclus, fin exclue,
+`valid_to = 9999-12-31` et `is_current = true` pour la version en cours) et une **clé de
+substitution** `flight_sk` / `passenger_sk` = `<clé naturelle>@<valid_from>`, déterministe (elle est
+identique à chaque reconstruction) et unique (une clé a au plus une version par jour).
+
+Pour chaque snapshot du jour D (`common.apply_scd2`), dans une transaction :
+
+1. **fermeture** de la version en cours (`valid_to = D`, `is_current = false`) si ses valeurs
+   diffèrent du snapshot (**modification**) ou si la clé a disparu (**suppression** : la version est
+   close sans successeur, ce qui équivaut au `is_active = false` du SCD1) ;
+2. **ouverture** d'une version `[D, 9999-12-31[` pour toute clé du snapshot sans version en cours
+   (nouvelle clé, clé modifiée qui vient d'être close, clé qui réapparaîtrait).
+
+Pourquoi `valid_from = D` : le snapshot du jour D décrit l'état de la source **le jour D**, et la
+source garantit que les réservations du jour D référencent les vols et passagers tels qu'ils sont
+dans les fichiers du jour D. Une réservation faite le jour D doit donc voir la version issue du
+snapshot D.
+
+### Lien avec le fait
+
+`fact_booking` porte, en plus des clés naturelles (état courant), `flight_sk` et `passenger_sk` :
+la version **valide le jour de la réservation** (`valid_from <= booking_date < valid_to`).
+Exemple réel : le vol F0141 était un Airbus A321 jusqu'au 07/09 puis un A330 à partir du 08/09 ;
+ses 25 réservations antérieures pointent vers la version A321, les 65 suivantes vers la version
+A330. Au total, 1 553 réservations pointent vers une version de vol qui n'est plus la version
+courante : c'est l'information que le SCD1 seul perdait.
+
+```sql
+-- Quel avion était affecté au vol F0141 le 05/09/2025 ?
+SELECT aircraft_type
+FROM dim_flight_history
+WHERE flight_id = 'F0141'
+  AND DATE '2025-09-05' >= valid_from AND DATE '2025-09-05' < valid_to;   -- Airbus A321
+```
+
+### Idempotence : un garde-fou spécifique
+
+L'upsert SCD1 est naturellement rejouable, pas l'historisation : rejouer un jour *ancien* après un
+jour plus récent fermerait des versions dans le passé et corromprait l'historique. Le dernier
+snapshot historisé est donc mémorisé par table (`silver_scd2_watermark`) et tout snapshot daté de
+ce jour ou d'avant est ignoré par l'historisation. Vérifié : rejouer le mois complet laisse
+l'historique strictement identique.
+
+### Contrôles
+
+Vérifiés sur le mois (et contrôlés automatiquement dans `ingest_gold` pour le fait) :
+
+- 735 versions pour 714 vols, 2 232 versions pour 2 221 passagers ;
+- versions en cours = lignes actives du SCD1 (696 vols, 2 214 passagers) et clés sans version en
+  cours = lignes désactivées (18 vols, 7 passagers) : les deux modèles sont cohérents ;
+- **aucun chevauchement ni trou** entre les versions successives d'une même clé ;
+- **chaque réservation trouve exactement une version** de vol et de passager.

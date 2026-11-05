@@ -23,3 +23,19 @@
 -- 8. Durée moyenne de vol par compagnie
 
 -- 9. Chiffre d'affaires par tranche d'âge de passager
+
+-- Bonus SCD2 : quel avion était affecté à un vol à une date donnée ?
+SELECT flight_id, aircraft_type, valid_from, valid_to
+FROM dim_flight_history
+WHERE flight_id = 'F0141'
+  AND DATE '2025-09-05' >= valid_from AND DATE '2025-09-05' < valid_to;
+
+-- Bonus SCD2 : réservations faites sur une version de vol qui a changé depuis
+-- (avion, horaire ou date différents de la version courante).
+SELECT fb.booking_id, fb.booking_date, h.aircraft_type AS avion_a_la_reservation,
+       f.aircraft_type AS avion_actuel, h.flight_date AS date_prevue, f.flight_date AS date_actuelle
+FROM fact_booking fb
+JOIN dim_flight_history h USING (flight_sk)
+JOIN dim_flight f ON f.flight_id = fb.flight_id
+WHERE NOT h.is_current
+ORDER BY fb.booking_date;

@@ -96,3 +96,84 @@ def upsert_snapshot(con, table: str, key: str, cols: list, snapshot_date):
         [snapshot_date],
     )
     con.commit()
+
+
+SCD2_OPEN_END = "9999-12-31"   # valid_to d'une version encore en cours
+SCD2_INIT_START = "1900-01-01"  # valid_from des versions issues de init/ (historique antérieur inconnu)
+
+
+def apply_scd2(con, history_table: str, sk: str, key: str, cols: list, snapshot_date, init: bool):
+    """Historise (SCD type 2) le snapshot complet du jour (table temporaire `snapshot`).
+
+    Chaque version d'une ligne est conservée avec sa période de validité [valid_from, valid_to[ :
+    borne de début incluse, borne de fin EXCLUE, valid_to = 9999-12-31 pour la version en cours.
+    Une ligne du snapshot du jour D décrit l'état de la source le jour D : une version créée à
+    partir du snapshot D est donc valide à partir de D (les réservations du jour D référencent
+    justement les vols / passagers tels qu'ils sont dans les fichiers du jour D).
+
+    1. Fermeture : la version en cours d'une clé est close (valid_to = D, is_current = false)
+       si ses valeurs diffèrent du snapshot (modification) ou si la clé a disparu (suppression,
+       la version est close sans successeur).
+    2. Ouverture : chaque clé du snapshot sans version en cours (nouvelle clé, clé modifiée qui
+       vient d'être close, clé qui réapparaît) reçoit une nouvelle version [D, 9999-12-31[.
+       Les versions issues de init/ commencent en 1900-01-01 : on ne connaît pas l'historique
+       antérieur, l'état initial est réputé valide depuis toujours.
+
+    Clé de substitution (surrogate key) `<clé>@<valid_from>` : déterministe (identique à chaque
+    reconstruction) et unique, puisqu'une clé a au plus une version par jour.
+
+    Garde-fou d'idempotence : contrairement à l'upsert SCD1, rejouer un jour ANCIEN casserait
+    l'historique (on fermerait des versions dans le passé). On mémorise donc le dernier snapshot
+    historisé (table silver_scd2_watermark) et on ignore tout snapshot daté de ce jour ou avant.
+    Rejouer le mois complet (run_month.py) est ainsi sans effet sur l'historique.
+    """
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS silver_scd2_watermark (
+            table_name VARCHAR PRIMARY KEY,
+            last_snapshot_date DATE,
+            insert_timestamp TIMESTAMP,
+            update_timestamp TIMESTAMP
+        )
+    """)
+    last = con.execute(
+        "SELECT last_snapshot_date FROM silver_scd2_watermark WHERE table_name = ?", [history_table]
+    ).fetchall()
+    if last and snapshot_date <= last[0][0]:
+        return  # déjà historisé : rien à faire
+
+    valid_from = SCD2_INIT_START if init else snapshot_date.isoformat()
+    col_list = ", ".join(cols)
+    has_changed = " OR ".join(f"h.{c} IS DISTINCT FROM s.{c}" for c in cols)
+
+    con.begin()
+    con.execute(
+        f"""
+        UPDATE {history_table} AS h
+        SET valid_to = CAST(? AS DATE), is_current = false, update_timestamp = now()
+        WHERE h.is_current AND (
+            NOT EXISTS (SELECT 1 FROM snapshot s WHERE s.{key} = h.{key})
+            OR EXISTS (SELECT 1 FROM snapshot s WHERE s.{key} = h.{key} AND ({has_changed}))
+        )
+        """,
+        [valid_from],
+    )
+    con.execute(
+        f"""
+        INSERT INTO {history_table} ({sk}, {key}, {col_list}, valid_from, valid_to, is_current,
+                                     insert_timestamp, update_timestamp)
+        SELECT s.{key} || '@' || ?, s.{key}, {", ".join("s." + c for c in cols)},
+               CAST(? AS DATE), DATE '{SCD2_OPEN_END}', true, now(), now()
+        FROM snapshot s
+        WHERE NOT EXISTS (SELECT 1 FROM {history_table} h WHERE h.{key} = s.{key} AND h.is_current)
+        """,
+        [valid_from, valid_from],
+    )
+    con.execute(
+        """
+        INSERT INTO silver_scd2_watermark VALUES (?, ?, now(), now())
+        ON CONFLICT (table_name) DO UPDATE SET
+            last_snapshot_date = excluded.last_snapshot_date, update_timestamp = now()
+        """,
+        [history_table, snapshot_date],
+    )
+    con.commit()

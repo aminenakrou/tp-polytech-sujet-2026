@@ -3,12 +3,14 @@ Ingestion de l'entité `passengers`, issue de DEUX systèmes sources au format d
 CRM FR), chacun livré en extrait complet quotidien.
 - bronze : les deux snapshots du jour copiés tels quels, séparément ;
 - silver : consolidation dans un schéma unique (colonnes, genre, formats de date) + upsert +
-  désactivation des passagers disparus ;
-- gold   : dim_passenger avec âge et tranche d'âge calculés.
+  désactivation des passagers disparus (silver_passengers, état courant) + historisation SCD2
+  de chaque version (silver_passengers_history, bonus) ;
+- gold   : dim_passenger (état courant) et dim_passenger_history (SCD2), avec âge et tranche
+  d'âge calculés.
 """
 from datetime import date
 
-from common import fetch_csv, get_connection, upsert_snapshot
+from common import apply_scd2, fetch_csv, get_connection, upsert_snapshot
 
 # Deux systèmes sources distincts (CRM anglophone / CRM francophone) : on les garde séparés en
 # bronze, tels que livrés. La consolidation dans un schéma unique se fera en silver.
@@ -50,6 +52,26 @@ def create_silver_table(con):
             source_system VARCHAR,   -- 'EN' ou 'FR'
             is_active BOOLEAN,
             deleted_date DATE,
+            insert_timestamp TIMESTAMP,
+            update_timestamp TIMESTAMP
+        )
+    """)
+    # Bonus SCD2 : une ligne par VERSION d'un passager, avec sa période de validité.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS silver_passengers_history (
+            passenger_sk VARCHAR PRIMARY KEY,   -- clé de substitution : <passenger_id>@<valid_from>
+            passenger_id VARCHAR,
+            first_name VARCHAR,
+            last_name VARCHAR,
+            gender VARCHAR,
+            nationality VARCHAR,
+            email VARCHAR,
+            birth_date DATE,
+            signup_date DATE,
+            source_system VARCHAR,
+            valid_from DATE,
+            valid_to DATE,
+            is_current BOOLEAN,
             insert_timestamp TIMESTAMP,
             update_timestamp TIMESTAMP
         )
@@ -99,13 +121,46 @@ def ingest_silver(day: date = None, init: bool = False):
         FROM snapshot_fr
     """)
     upsert_snapshot(con, "silver_passengers", "passenger_id", PASSENGER_COLS, snapshot_date)
+    apply_scd2(con, "silver_passengers_history", "passenger_sk", "passenger_id", PASSENGER_COLS,
+               snapshot_date, init)
     con.unregister("snapshot_en")
     con.unregister("snapshot_fr")
     con.close()
 
 
+_AGE_SQL = "date_sub('year', birth_date, reference_date)"
+
+# Attributs (dont calculés) communs à dim_passenger et dim_passenger_history.
+_PASSENGER_GOLD_COLUMNS = f"""
+    passenger_id,
+    first_name,
+    last_name,
+    gender,
+    nationality,
+    email,
+    birth_date,
+    signup_date,
+    source_system,
+    {_AGE_SQL} AS age,
+    CASE
+        WHEN {_AGE_SQL} < 18 THEN '0-17'
+        WHEN {_AGE_SQL} < 25 THEN '18-24'
+        WHEN {_AGE_SQL} < 35 THEN '25-34'
+        WHEN {_AGE_SQL} < 45 THEN '35-44'
+        WHEN {_AGE_SQL} < 55 THEN '45-54'
+        WHEN {_AGE_SQL} < 65 THEN '55-64'
+        ELSE '65+'
+    END AS age_band,
+    reference_date AS age_reference_date"""
+
+_REFERENCE_DATE_CTE = """
+    ref AS (
+        SELECT coalesce(max(booking_date), current_date) AS reference_date FROM silver_bookings
+    )"""
+
+
 def ingest_gold():
-    """Reconstruit dim_passenger à partir de l'état courant de silver_passengers.
+    """Reconstruit dim_passenger (état courant) et dim_passenger_history (SCD2) depuis le silver.
 
     Attributs calculés :
     - age : nombre d'années révolues à la date de référence (date_sub('year', ...) tient compte
@@ -118,41 +173,29 @@ def ingest_gold():
     reproductible). Pour l'âge AU MOMENT de chaque réservation, voir fact_booking.
     """
     con = get_connection()
-    con.execute("""
+    con.execute(f"""
         CREATE OR REPLACE TABLE dim_passenger AS
-        WITH ref AS (
-            SELECT coalesce(max(booking_date), current_date) AS reference_date FROM silver_bookings
-        ),
-        aged AS (
-            SELECT p.*, ref.reference_date, date_sub('year', p.birth_date, ref.reference_date) AS age
-            FROM silver_passengers p CROSS JOIN ref
-        )
+        WITH {_REFERENCE_DATE_CTE}
         SELECT
-            passenger_id,
-            first_name,
-            last_name,
-            gender,
-            nationality,
-            email,
-            birth_date,
-            signup_date,
-            source_system,
-            age,
-            CASE
-                WHEN age < 18 THEN '0-17'
-                WHEN age < 25 THEN '18-24'
-                WHEN age < 35 THEN '25-34'
-                WHEN age < 45 THEN '35-44'
-                WHEN age < 55 THEN '45-54'
-                WHEN age < 65 THEN '55-64'
-                ELSE '65+'
-            END AS age_band,
-            reference_date AS age_reference_date,
+            {_PASSENGER_GOLD_COLUMNS},
             is_active,
             deleted_date,
             insert_timestamp,
             update_timestamp
-        FROM aged
+        FROM silver_passengers CROSS JOIN ref
+    """)
+    con.execute(f"""
+        CREATE OR REPLACE TABLE dim_passenger_history AS
+        WITH {_REFERENCE_DATE_CTE}
+        SELECT
+            passenger_sk,
+            {_PASSENGER_GOLD_COLUMNS},
+            valid_from,
+            valid_to,
+            is_current,
+            insert_timestamp,
+            update_timestamp
+        FROM silver_passengers_history CROSS JOIN ref
     """)
     con.close()
 

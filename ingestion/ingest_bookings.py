@@ -153,12 +153,17 @@ def ingest_gold():
     # dim_passenger.age qui dépend de la date de référence).
     # days_before_departure : délai de réservation, mesure classique du transport aérien.
     # Jointures LEFT : une réservation n'est jamais perdue même si une référence manquait.
+    # Bonus SCD2 : flight_sk / passenger_sk pointent vers la VERSION du vol et du passager valide
+    # le jour de la réservation (valid_from <= booking_date < valid_to), en plus des clés
+    # naturelles qui pointent vers l'état courant (dim_flight / dim_passenger).
     con.execute("""
         CREATE OR REPLACE TABLE fact_booking AS
         SELECT
             b.booking_id,
             b.passenger_id,
+            ph.passenger_sk,
             b.flight_id,
+            fh.flight_sk,
             b.airport_id,
             b.booking_date,
             f.flight_date,
@@ -176,6 +181,12 @@ def ingest_gold():
         LEFT JOIN dim_currency c ON c.currency = b.currency
         LEFT JOIN dim_flight f ON f.flight_id = b.flight_id
         LEFT JOIN dim_passenger p ON p.passenger_id = b.passenger_id
+        LEFT JOIN dim_flight_history fh
+            ON fh.flight_id = b.flight_id
+           AND b.booking_date >= fh.valid_from AND b.booking_date < fh.valid_to
+        LEFT JOIN dim_passenger_history ph
+            ON ph.passenger_id = b.passenger_id
+           AND b.booking_date >= ph.valid_from AND b.booking_date < ph.valid_to
     """)
 
     # --- agg_daily_revenue_airline : chiffre d'affaires par jour (de réservation) et par
@@ -202,16 +213,24 @@ def ingest_gold():
         ORDER BY fb.booking_date, f.airline
     """)
 
-    # Contrôle de cohérence annoncé dans run_month.py : airport_id d'une réservation = aéroport
-    # de départ du vol réservé, et chaque devise doit avoir un taux.
-    bad_airport, no_rate = con.execute("""
+    # Contrôles de cohérence :
+    # - airport_id d'une réservation = aéroport de départ du vol réservé (annoncé dans run_month.py) ;
+    # - chaque devise a un taux ;
+    # - SCD2 : chaque réservation trouve exactement UNE version de vol et de passager (pas de
+    #   trou ni de chevauchement dans les périodes de validité). Un doublon de booking_id
+    #   signalerait un chevauchement, un sk NULL un trou.
+    bad_airport, no_rate, no_version, n_rows, n_ids = con.execute("""
         SELECT
             count(*) FILTER (WHERE f.origin_airport_id IS DISTINCT FROM fb.airport_id),
-            count(*) FILTER (WHERE fb.amount_eur IS NULL)
+            count(*) FILTER (WHERE fb.amount_eur IS NULL),
+            count(*) FILTER (WHERE fb.flight_sk IS NULL OR fb.passenger_sk IS NULL),
+            count(*),
+            count(DISTINCT fb.booking_id)
         FROM fact_booking fb LEFT JOIN dim_flight f ON f.flight_id = fb.flight_id
     """).fetchall()[0]
-    if bad_airport or no_rate:
-        print(f"  [WARN] fact_booking : {bad_airport} airport_id incohérent(s), {no_rate} montant(s) sans taux")
+    if bad_airport or no_rate or no_version or n_rows != n_ids:
+        print(f"  [WARN] fact_booking : {bad_airport} airport_id incohérent(s), {no_rate} montant(s) "
+              f"sans taux, {no_version} sans version SCD2, {n_rows - n_ids} doublon(s)")
 
     con.close()
 
