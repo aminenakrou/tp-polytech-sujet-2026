@@ -79,8 +79,53 @@ def ingest_silver(day: date = None, init: bool = False):
 
 
 def ingest_gold():
-    # TODO : reconstruire la/les table(s) de gold avec les données flights à partir de silver_flights
-    raise NotImplementedError
+    """Reconstruit dim_flight à partir de l'état courant de silver_flights.
+
+    Attributs calculés :
+    - duration_minutes : (arrivée - départ) en minutes, modulo 24 h. Un vol dont l'heure
+      d'arrivée est "avant" l'heure de départ (ex. 15:30 -> 03:41) arrive le lendemain : sans le
+      modulo on obtiendrait une durée négative. Les heures sont supposées exprimées dans un même
+      référentiel (pas de fuseaux horaires dans la source : limite connue, cf. DOCUMENTATION.md).
+    - is_overnight : le vol arrive le jour suivant son départ.
+    - departure_datetime / arrival_datetime : horodatages complets, la date d'arrivée étant
+      décalée d'un jour pour les vols de nuit.
+
+    Les vols désactivés (is_active = false) sont CONSERVÉS : des réservations passées les
+    référencent, fact_booking doit toujours pouvoir les joindre.
+    """
+    con = get_connection()
+    con.execute("""
+        CREATE OR REPLACE TABLE dim_flight AS
+        WITH base AS (
+            SELECT
+                *,
+                hour(departure_time) * 60 + minute(departure_time) AS dep_minute_of_day,
+                hour(arrival_time) * 60 + minute(arrival_time)     AS arr_minute_of_day
+            FROM silver_flights
+        )
+        SELECT
+            flight_id,
+            flight_number,
+            airline,
+            origin_airport_id,
+            destination_airport_id,
+            flight_date,
+            departure_time,
+            arrival_time,
+            aircraft_type,
+            (arr_minute_of_day - dep_minute_of_day + 1440) % 1440 AS duration_minutes,
+            arr_minute_of_day < dep_minute_of_day                  AS is_overnight,
+            flight_date + departure_time                           AS departure_datetime,
+            flight_date + departure_time
+                + to_minutes((arr_minute_of_day - dep_minute_of_day + 1440) % 1440)
+                                                                   AS arrival_datetime,
+            is_active,
+            deleted_date,
+            insert_timestamp,
+            update_timestamp
+        FROM base
+    """)
+    con.close()
 
 
 def init():

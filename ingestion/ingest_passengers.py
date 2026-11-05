@@ -101,8 +101,56 @@ def ingest_silver(day: date = None, init: bool = False):
 
 
 def ingest_gold():
-    # TODO : reconstruire la/les table(s) de gold avec les données passengers à partir de silver_passengers
-    raise NotImplementedError
+    """Reconstruit dim_passenger à partir de l'état courant de silver_passengers.
+
+    Attributs calculés :
+    - age : nombre d'années révolues à la date de référence (date_sub('year', ...) tient compte
+      du jour et du mois : on n'a 35 ans que le jour de son anniversaire, pas dès le 1er janvier).
+    - age_band : tranche d'âge, bornes classiques du marketing / transport aérien.
+
+    Date de référence = dernier jour de données chargé (max(booking_date) en silver), et non
+    current_date : le jeu de données est daté de 2025, un calcul "à aujourd'hui" décalerait tous
+    les âges et rendrait le résultat dépendant du jour où l'on lance le pipeline (non
+    reproductible). Pour l'âge AU MOMENT de chaque réservation, voir fact_booking.
+    """
+    con = get_connection()
+    con.execute("""
+        CREATE OR REPLACE TABLE dim_passenger AS
+        WITH ref AS (
+            SELECT coalesce(max(booking_date), current_date) AS reference_date FROM silver_bookings
+        ),
+        aged AS (
+            SELECT p.*, ref.reference_date, date_sub('year', p.birth_date, ref.reference_date) AS age
+            FROM silver_passengers p CROSS JOIN ref
+        )
+        SELECT
+            passenger_id,
+            first_name,
+            last_name,
+            gender,
+            nationality,
+            email,
+            birth_date,
+            signup_date,
+            source_system,
+            age,
+            CASE
+                WHEN age < 18 THEN '0-17'
+                WHEN age < 25 THEN '18-24'
+                WHEN age < 35 THEN '25-34'
+                WHEN age < 45 THEN '35-44'
+                WHEN age < 55 THEN '45-54'
+                WHEN age < 65 THEN '55-64'
+                ELSE '65+'
+            END AS age_band,
+            reference_date AS age_reference_date,
+            is_active,
+            deleted_date,
+            insert_timestamp,
+            update_timestamp
+        FROM aged
+    """)
+    con.close()
 
 
 def init():
