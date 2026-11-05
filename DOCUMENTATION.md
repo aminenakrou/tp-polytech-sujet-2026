@@ -62,7 +62,7 @@ Chaque entité a son script avec 3 fonctions (`ingest_bronze`, `ingest_silver`, 
 Chaque fonction ne relit que ce que la précédente a **persisté** (fichier sur disque, puis table
 silver) : ce sont des tâches indépendantes, rejouables, et prêtes à être orchestrées.
 
-### Bronze — copie brute fidèle
+### Bronze: copie brute fidèle
 
 - Le fichier est téléchargé et écrit **octet par octet**, sans passer par pandas : aucune
   transformation (ni guillemets, ni format de nombre, ni encodage). Vérifié : les 155 fichiers
@@ -73,7 +73,7 @@ silver) : ce sont des tâches indépendantes, rejouables, et prêtes à être or
   jamais un fichier tronqué qui serait pris pour « déjà téléchargé » au lancement suivant.
 - Lecture en `dtype=str` : le bronze n'interprète aucun type, c'est le rôle du silver.
 
-### Silver — données typées, consolidées, à jour
+### Silver: données typées, consolidées, à jour
 
 Le silver est l'endroit où l'on **type** les colonnes (`DATE`, `TIME`, `DECIMAL(12,2)`) et où l'on
 applique la **stratégie de chargement** propre à chaque source.
@@ -127,7 +127,7 @@ réservation absente du fichier du jour n'a pas disparu, elle a été faite un a
 Un **contrôle qualité** signale toute réservation qui référencerait un passager, un vol ou un
 aéroport inconnu en silver (0 sur le mois), sans bloquer le chargement.
 
-### Gold — schéma en étoile
+### Gold:schéma en étoile
 
 Le gold est **reconstruit** à chaque exécution depuis l'état courant du silver
 (`CREATE OR REPLACE`) : il ne dépend d'aucune date, il est donc toujours cohérent avec le silver.
@@ -313,7 +313,7 @@ aucun doublon et ne modifie aucune ligne (vérifié en relançant le 30/09 puis 
   les lignes absentes. Un vrai pipeline ajouterait un garde-fou (ex. refuser un snapshot dont la
   taille chute brutalement).
 
-## 6. Bonus — historisation complète (SCD2) des vols et des passagers
+## 6. Bonus: historisation complète (SCD2) des vols et des passagers
 
 Les tables `dim_flight` / `dim_passenger` (SCD de type 1) ne gardent que l'état courant : quand un
 vol change d'avion, l'ancienne valeur est écrasée. Pour répondre à des questions comme *« quel
