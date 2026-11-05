@@ -53,7 +53,7 @@ Le grain de la table de fait est **une ligne par réservation**.
 
 ```mermaid
 flowchart LR
-    S[(Dataset GitHub<br/>CSV quotidiens)] -->|fetch_csv| B[Bronze<br/>bronze/&lt;subdir&gt;/*.csv<br/>fichiers bruts]
+    S[(Dataset GitHub<br/>CSV quotidiens)] -->|fetch_csv| B[Bronze<br/>bronze/init, bronze/2025-09<br/>fichiers bruts]
     B -->|typage, consolidation,<br/>insert / upsert| SV[Silver<br/>silver_* dans DuckDB]
     SV -->|attributs calculés,<br/>étoile, agrégat| G[Gold<br/>dim_*, fact_booking,<br/>agg_daily_revenue_airline]
 ```

@@ -1,6 +1,9 @@
 """
-À compléter : ingestion de l'entité `flights`, découpée en 3 fonctions bronze/silver/gold
-(même structure que `ingest_airports.py`, à utiliser comme modèle).
+Ingestion de l'entité `flights` (dimension qui évolue souvent : extrait complet quotidien avec
+ajouts, changements d'horaire / de date / d'avion, et suppressions).
+- bronze : snapshot du jour copié tel quel dans bronze/ ;
+- silver : typage (DATE, TIME) + upsert + désactivation des vols disparus ;
+- gold   : dim_flight avec durée de vol calculée (vols de nuit gérés).
 """
 from datetime import date
 
@@ -59,6 +62,8 @@ def ingest_silver(day: date = None, init: bool = False):
     create_silver_table(con)
     con.register("snapshot_raw", df)
     # Typage : le bronze est 100 % texte, c'est ici qu'on donne leur vrai type aux colonnes.
+    # Les heures sources sont au format "HH:MM" (sans secondes) : format explicite via strptime,
+    # un simple CAST(... AS TIME) échoue sur les versions de DuckDB < 1.0.
     con.execute("""
         CREATE OR REPLACE TEMP TABLE snapshot AS
         SELECT
@@ -68,8 +73,8 @@ def ingest_silver(day: date = None, init: bool = False):
             origin_airport_id,
             destination_airport_id,
             CAST(flight_date AS DATE)    AS flight_date,
-            CAST(departure_time AS TIME) AS departure_time,
-            CAST(arrival_time AS TIME)   AS arrival_time,
+            CAST(strptime(departure_time, '%H:%M') AS TIME) AS departure_time,
+            CAST(strptime(arrival_time, '%H:%M') AS TIME)   AS arrival_time,
             aircraft_type
         FROM snapshot_raw
     """)

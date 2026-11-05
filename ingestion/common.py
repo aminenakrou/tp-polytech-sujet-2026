@@ -1,6 +1,9 @@
 """
-Utilitaires partagés par les scripts d'ingestion. `get_connection` est fourni tel quel ;
-`fetch_csv` est à vous d'implémenter (cf. TODO)
+Utilitaires partagés par les scripts d'ingestion :
+- `fetch_csv` : téléchargement d'un fichier source vers bronze/ (avec cache) puis relecture disque ;
+- `get_connection` : connexion à l'entrepôt DuckDB local (fourni) ;
+- `upsert_snapshot` : chargement silver commun aux dimensions livrées en extrait complet
+  (upsert sur vrai changement + désactivation des lignes disparues).
 """
 import os
 import urllib.request

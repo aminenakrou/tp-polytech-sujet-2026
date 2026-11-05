@@ -1,9 +1,9 @@
 """
-Exemple pour l'entité `airports` (la dimension la plus stable du jeu de données) : `ingest_silver`
-et `ingest_gold` sont complets, sert de modèle pour les 3 scripts restants. `ingest_bronze` (et
-`fetch_csv` dans `common.py`, dont elle dépend) sont à votre charge ici aussi — même sur cet
-exemple : c'est simple, mais ça vaut le coup de l'écrire et de la comprendre vous-même plutôt que
-de partir d'une ingestion déjà faite.
+Ingestion de l'entité `airports` (la dimension la plus stable du jeu de données : extrait complet
+quotidien, 1 ajout et 1 correction sur le mois).
+- bronze : snapshot du jour copié tel quel dans bronze/ ;
+- silver : upsert + désactivation des aéroports disparus (common.upsert_snapshot) ;
+- gold   : dim_airport, copie de l'état courant du silver.
 
 Découpé en 3 fonctions correspondant aux 3 couches du médaillon — un peu comme 3 tâches
 distinctes qu'exécuterait un pipeline orchestré (cf. bonus Dagster) : chaque fonction relit ce

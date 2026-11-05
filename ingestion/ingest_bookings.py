@@ -1,6 +1,10 @@
 """
-À compléter : ingestion de l'entité `bookings`, découpée en 3 fonctions bronze/silver/gold
-(même structure que `ingest_airports.py`, à utiliser comme modèle).
+Ingestion de l'entité `bookings`, la table de FAIT : évènements immuables, chaque fichier ne
+contient que les réservations du jour.
+- bronze : fichier du jour copié tel quel dans bronze/ ;
+- silver : insert simple idempotent (ON CONFLICT DO NOTHING), aucune désactivation ;
+- gold   : dim_date, fact_booking (amount_eur) et la table d'agrégation
+  agg_daily_revenue_airline (chiffre d'affaires par jour et par compagnie).
 """
 from datetime import date
 
@@ -123,15 +127,23 @@ def ingest_gold():
                       (SELECT min(flight_date) FROM silver_flights))    AS d_min,
                 greatest((SELECT max(booking_date) FROM silver_bookings),
                          (SELECT max(flight_date) FROM silver_flights)) AS d_max
+        ),
+        -- generate_series en fonction scalaire (liste) + unnest : syntaxe compatible avec toutes
+        -- les versions de DuckDB autorisées par requirements.txt (>= 0.10).
+        days AS (
+            SELECT CAST(unnest(generate_series(
+                CAST(d_min AS TIMESTAMP), CAST(d_max AS TIMESTAMP), INTERVAL 1 DAY
+            )) AS DATE) AS d
+            FROM bounds
         )
         SELECT
-            CAST(d AS DATE),
+            d,
             year(d), month(d), day(d),
             isodow(d),
             dayname(d),
             isodow(d) >= 6,
             now(), now()
-        FROM bounds, generate_series(CAST(d_min AS TIMESTAMP), CAST(d_max AS TIMESTAMP), INTERVAL 1 DAY) AS t(d)
+        FROM days
         ON CONFLICT (date_key) DO NOTHING
     """)
 

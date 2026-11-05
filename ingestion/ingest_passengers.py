@@ -1,6 +1,10 @@
 """
-À compléter : ingestion de l'entité `passengers`, découpée en 3 fonctions bronze/silver/gold
-(même structure que `ingest_airports.py`, à utiliser comme modèle).
+Ingestion de l'entité `passengers`, issue de DEUX systèmes sources au format différent (CRM EN et
+CRM FR), chacun livré en extrait complet quotidien.
+- bronze : les deux snapshots du jour copiés tels quels, séparément ;
+- silver : consolidation dans un schéma unique (colonnes, genre, formats de date) + upsert +
+  désactivation des passagers disparus ;
+- gold   : dim_passenger avec âge et tranche d'âge calculés.
 """
 from datetime import date
 
