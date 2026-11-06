@@ -1,0 +1,113 @@
+# Vérifie à chaque push que le pipeline se régénère entièrement depuis un clone propre
+# (bronze/ et warehouse.duckdb ne sont jamais committés : ils sont recréés ici de zéro).
+name: Pipeline
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pipeline:
+    name: run_month.py depuis un clone propre
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Installation
+        run: pip install -r requirements.txt
+
+      - name: Pipeline complet (init + 30 jours)
+        working-directory: ingestion
+        run: |
+          python run_month.py | tee ../run1.log
+          # Les contrôles qualité du pipeline affichent [WARN] en cas d'anomalie : on les rend bloquants.
+          if grep -q "\[WARN\]" ../run1.log; then echo "::error::Contrôle qualité en échec"; exit 1; fi
+
+      - name: Vérification du modèle gold
+        run: |
+          python - <<'EOF'
+          import duckdb
+
+          con = duckdb.connect("warehouse.duckdb", read_only=True)
+          q = lambda sql: con.execute(sql).fetchall()[0][0]
+
+          # Volumes attendus pour le jeu de données source (généré avec une graine fixe).
+          expected = {
+              "dim_airport": 81, "dim_flight": 714, "dim_passenger": 2221, "dim_date": 73,
+              "fact_booking": 38930, "agg_daily_revenue_airline": 925,
+              "dim_flight_history": 735, "dim_passenger_history": 2232,
+          }
+          errors = []
+          for table, n in expected.items():
+              got = q(f"SELECT count(*) FROM {table}")
+              print(f"{table:28} {got:>6} lignes")
+              if got != n:
+                  errors.append(f"{table} : {got} lignes au lieu de {n}")
+
+          checks = {
+              "réservations sans montant EUR": "SELECT count(*) FROM fact_booking WHERE amount_eur IS NULL",
+              "réservations sans version SCD2": "SELECT count(*) FROM fact_booking WHERE flight_sk IS NULL OR passenger_sk IS NULL",
+              "vols à durée hors [1 min, 24 h[": "SELECT count(*) FROM dim_flight WHERE duration_minutes NOT BETWEEN 1 AND 1439",
+              "passagers sans tranche d'âge": "SELECT count(*) FROM dim_passenger WHERE age_band IS NULL",
+              "écart agrégat / fait (EUR)": "SELECT abs((SELECT sum(revenue_eur) FROM agg_daily_revenue_airline) - (SELECT sum(amount_eur) FROM fact_booking))",
+          }
+          for label, sql in checks.items():
+              got = q(sql)
+              print(f"{label:34} {got}")
+              if got:
+                  errors.append(f"{label} : {got}")
+
+          if errors:
+              raise SystemExit("ÉCHEC :\n- " + "\n- ".join(errors))
+          print("Modèle gold conforme.")
+          EOF
+
+      - name: Idempotence (rejeu complet du mois)
+        run: |
+          python - <<'EOF' > before.txt
+          import duckdb
+          con = duckdb.connect("warehouse.duckdb", read_only=True)
+          for t in ["silver_airports", "silver_flights", "silver_passengers", "silver_bookings",
+                    "silver_flights_history", "silver_passengers_history", "fact_booking"]:
+              print(t, con.execute(f"SELECT count(*), max(update_timestamp) FROM {t}").fetchall())
+          EOF
+          (cd ingestion && python run_month.py > /dev/null)
+          python - <<'EOF' > after.txt
+          import duckdb
+          con = duckdb.connect("warehouse.duckdb", read_only=True)
+          for t in ["silver_airports", "silver_flights", "silver_passengers", "silver_bookings",
+                    "silver_flights_history", "silver_passengers_history", "fact_booking"]:
+              print(t, con.execute(f"SELECT count(*), max(update_timestamp) FROM {t}").fetchall())
+          EOF
+          cat after.txt
+          # Le rejeu repasse par l'init et les premiers jours puis revient au 30/09 : les volumes
+          # et l'historique SCD2 doivent être strictement identiques.
+          diff <(cut -d' ' -f1-2 before.txt | sed 's/, datetime.*//') <(cut -d' ' -f1-2 after.txt | sed 's/, datetime.*//') \
+            && echo "Volumes identiques après rejeu."
+          diff <(grep _history before.txt) <(grep _history after.txt) && echo "Historique SCD2 inchangé."
+
+  dagster:
+    name: Bonus Dagster (chargement des définitions)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Installation
+        run: pip install -r requirements-dagster.txt
+
+      - name: Validation des assets, partitions et dépendances
+        working-directory: orchestration
+        run: dagster definitions validate -w workspace.yaml
