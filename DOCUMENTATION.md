@@ -1,4 +1,4 @@
-# Documentation — choix de modélisation et de chargement
+# Documentation : choix de modélisation et de chargement
 
 Ce document justifie les choix faits dans le pipeline : ce qui est un fait, ce qui est une
 dimension, comment chaque source est chargée, et les limites connues du modèle.
