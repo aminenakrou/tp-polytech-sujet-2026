@@ -1,0 +1,4 @@
+# Bonus Dagster uniquement (le reste du TP n'a besoin que de requirements.txt).
+-r requirements.txt
+dagster>=1.13
+dagster-webserver>=1.13

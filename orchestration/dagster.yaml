@@ -1,0 +1,11 @@
+# Configuration de l'instance Dagster locale, lue par `dagster dev` lancé depuis ce dossier.
+
+concurrency:
+  runs:
+    # Un seul run à la fois : DuckDB n'accepte qu'un processus écrivain sur warehouse.duckdb.
+    # Les jours d'un backfill sont de toute façon traités dans l'ordre (dépendance de chaque
+    # silver à sa partition de la veille), on ne perd donc pas de parallélisme utile.
+    max_concurrent_runs: 1
+
+telemetry:
+  enabled: false

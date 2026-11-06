@@ -382,3 +382,119 @@ Vérifiés sur le mois (et contrôlés automatiquement dans `ingest_gold` pour l
   cours = lignes désactivées (18 vols, 7 passagers) : les deux modèles sont cohérents ;
 - **aucun chevauchement ni trou** entre les versions successives d'une même clé ;
 - **chaque réservation trouve exactement une version** de vol et de passager.
+
+## 7. Bonus — orchestration avec Dagster
+
+Le dossier `orchestration/` remplace `run_month.py` par un pipeline Dagster. `run_month.py` reste
+utilisable tel quel ; Dagster n'est nécessaire que pour ce bonus (`requirements-dagster.txt`).
+
+```bash
+pip install -r requirements-dagster.txt
+cd orchestration
+dagster dev          # puis http://localhost:3000
+```
+
+Dans l'interface : **Assets → Materialize all → toutes les partitions** lance le backfill complet
+(init + 30 jours), l'équivalent exact de `run_month.py`.
+
+### Assets
+
+**Une fonction = un asset** : chaque `ingest_bronze` / `ingest_silver` / `ingest_gold` des 4
+scripts devient un asset (`bronze/flights`, `silver/flights`, `gold/flights`, …), soit 12 assets,
+plus `dim_currency` (non partitionné, exécute `sql/init/dim_currency.sql` une fois). Le code
+d'ingestion n'est pas dupliqué : les assets appellent les fonctions existantes. Chaque asset
+silver / gold affiche en métadonnées le nombre de lignes des tables qu'il produit.
+
+Les assets sont rangés en groupes `bronze`, `silver`, `gold` (et `init` pour `dim_currency`), ce
+qui rend l'architecture médaillon directement visible dans le graphe de l'interface.
+
+### Partitions quotidiennes
+
+`DailyPartitionsDefinition` du **2025-08-31 au 2025-09-30** (31 partitions). La partition
+**2025-08-31 représente l'état initial** (`init/`, données jusqu'au 31/08, date déjà utilisée
+comme date de snapshot de l'init dans le code), les 30 autres les jours de septembre.
+
+### Dépendances
+
+```mermaid
+flowchart LR
+    subgraph bronze
+        bA[bronze/airports]; bF[bronze/flights]; bP[bronze/passengers]; bB[bronze/bookings]
+    end
+    subgraph silver
+        sA[silver/airports]; sF[silver/flights]; sP[silver/passengers]; sB[silver/bookings]
+    end
+    subgraph gold
+        gA[gold/airports]; gF[gold/flights]; gP[gold/passengers]; gB[gold/bookings]
+    end
+    C[dim_currency]
+    bA --> sA --> gA
+    bF --> sF --> gF
+    bP --> sP --> gP
+    bB --> sB
+    sA & sF & sP --> sB
+    sB --> gP
+    sB & sF & gF & gP & C --> gB
+    sA -. "J-1" .-> sA
+    sF -. "J-1" .-> sF
+    sP -. "J-1" .-> sP
+    sB -. "J-1" .-> sB
+```
+
+- Les dépendances suivent les **données réellement lues** : le silver des réservations contrôle
+  les références vers les 3 dimensions du même jour, le gold des passagers lit `silver_bookings`
+  (date de référence de l'âge), le gold des réservations lit `dim_flight`, `dim_passenger`,
+  `dim_currency` et `silver_flights` (bornes de `dim_date`). C'est la contrainte que `run_month.py`
+  traduisait par son ordre « bronze des 4, puis silver des 4, puis gold des 4 ».
+- **Chaque asset silver dépend de sa propre partition de la veille** (pointillés `J-1`,
+  `TimeWindowPartitionMapping(start_offset=-1, end_offset=-1)`). Le silver est un état cumulatif
+  (upsert, désactivations, historique SCD2) : charger le 15/09 avant le 14/09 corromprait l'état.
+  Avec cette auto-dépendance, Dagster ne lance jamais un jour dont la veille n'est ni chargée ni
+  demandée dans le même backfill.
+
+### Un backfill = un run par niveau, pas un run par jour
+
+Premier essai sans politique de backfill : Dagster découpait le backfill **asset par asset et jour
+par jour**, soit environ 170 petits runs et plus de 30 minutes, avec des jours qui n'avançaient pas
+ensemble (le silver des aéroports au 17/09 alors que celui des réservations n'avait pas commencé
+le 31/08). Le résultat final restait correct grâce aux dépendances, mais ce n'était ni efficace ni
+fidèle à `run_month.py`.
+
+Tous les assets partitionnés ont donc une **`BackfillPolicy.single_run()`** : chaque asset reçoit
+la **plage complète** des jours demandés dans un seul run.
+
+- **bronze / silver** bouclent sur ces jours **dans l'ordre chronologique** (`sorted(context.partition_keys)`) ;
+- **gold** n'est reconstruit qu'**une seule fois**, à la fin : il ne dépend que de l'état courant
+  du silver, pas d'une date (c'est sa définition dans le sujet), le refaire pour chaque jour
+  intermédiaire serait inutile ;
+- une matérialisation d'un seul jour (usage quotidien) est simplement une plage de longueur 1.
+
+### Accès concurrent à DuckDB
+
+DuckDB n'accepte qu'un processus écrivain à la fois sur `warehouse.duckdb`. Deux réglages évitent
+tout conflit :
+
+- **exécuteur in-process** (`Definitions(executor=in_process_executor)`) : les assets d'un même run
+  s'exécutent l'un après l'autre dans un seul processus ;
+- **un seul run à la fois** (`orchestration/dagster.yaml`, `max_concurrent_runs: 1`) : les runs
+  passent par la file d'attente de Dagster. Les niveaux du pipeline étant de toute façon
+  séquentiels (dépendances), on ne perd pas de parallélisme utile.
+
+### Vérification
+
+- Sur un entrepôt et un bronze **vides**, le backfill complet des 31 partitions se termine en
+  `COMPLETED_SUCCESS` en **5 runs** (bronze ; `dim_currency` ; aéroports ; vols + passagers ;
+  réservations), chacun couvrant toute la plage du 31/08 au 30/09 — environ 4 min 30, dont le
+  téléchargement des 155 fichiers et l'attente entre runs gérée par le démon Dagster.
+- Il produit **exactement les mêmes tables** que `run_month.py` : contenu identique pour
+  `dim_flight`, `dim_passenger`, `dim_date`, `fact_booking`, `agg_daily_revenue_airline` et les
+  tables d'historique SCD2 (comparaison de toutes les colonnes hors horodatages techniques).
+- Rematérialiser ensuite la seule partition du 30/09 ne modifie **aucune** table.
+
+### Limites
+
+- Le stockage de l'instance Dagster est temporaire (supprimé à l'arrêt de `dagster dev`) ; pour
+  garder l'historique des runs, définir la variable `DAGSTER_HOME`.
+- Rematérialiser une partition **ancienne** isolément (et non tout le backfill) relance le chargement
+  de ce jour : les tables d'état courant reviendraient temporairement à cet état (cf. section 5),
+  l'historique SCD2 restant protégé par son garde-fou.

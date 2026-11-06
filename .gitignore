@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 bronze/
 warehouse.duckdb
+warehouse.duckdb.wal
+# Bonus Dagster : stockage temporaire créé par `dagster dev` (supprimé à l'arrêt)
+.tmp_dagster_home_*/
