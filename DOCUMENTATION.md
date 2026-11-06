@@ -383,7 +383,7 @@ Vérifiés sur le mois (et contrôlés automatiquement dans `ingest_gold` pour l
 - **aucun chevauchement ni trou** entre les versions successives d'une même clé ;
 - **chaque réservation trouve exactement une version** de vol et de passager.
 
-## 7. Bonus — orchestration avec Dagster
+## 7. Bonus: orchestration avec Dagster
 
 Le dossier `orchestration/` remplace `run_month.py` par un pipeline Dagster. `run_month.py` reste
 utilisable tel quel ; Dagster n'est nécessaire que pour ce bonus (`requirements-dagster.txt`).
